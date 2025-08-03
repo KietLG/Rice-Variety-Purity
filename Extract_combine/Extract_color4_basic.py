@@ -1,0 +1,248 @@
+import os
+import cv2
+import numpy as np
+import pandas as pd
+from scipy.stats import skew
+from skimage.measure import regionprops, label
+
+def calc_skew(channel):
+    """Tính skewness cho 1 mảng numpy (channel)."""
+    c_mean = np.mean(channel)
+    c_std = np.std(channel) + 1e-5
+    return np.mean((channel - c_mean) ** 3) / (c_std ** 3)
+
+def calc_kurtosis(channel):
+    """Tính kurtosis cho 1 mảng numpy (channel)."""
+    c_mean = np.mean(channel)
+    c_std = np.std(channel) + 1e-5
+    return np.mean((channel - c_mean) ** 4) / (c_std ** 4) - 3
+
+def channel_stats(channel):
+    """Tính các thống kê: mean, std, skewness, kurtosis, median, min, max."""
+    return [
+        np.mean(channel),
+        np.std(channel),
+        calc_skew(channel),
+        calc_kurtosis(channel),
+        np.median(channel),
+        np.min(channel),
+        np.max(channel)
+    ]
+
+def extract_basic_features(image):
+    """
+    Trích xuất 30 đặc trưng nâng cao gồm:
+      - 14 đặc trưng hình học của đối tượng (dựa trên vùng được xác định bằng Otsu thresholding).
+      - 12 đặc trưng màu RGB: với mỗi kênh tính mean, sqrt(mean), std, skewness.
+      - 4 đặc trưng texture từ vùng đối tượng: mean, std, uniformity, third moment.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    labeled = label(binary)
+    regions = regionprops(labeled)
+    epsilon = 1e-5
+
+    (area, length, width_obj, length_width_ratio, major_axis, minor_axis,
+     convex_area, convex_perimeter, perimeter, eccentricity, orientation,
+     solidity, extent, roundness) = [0]*14
+    texture_mean = texture_std = texture_uniformity = texture_third_moment = 0
+
+    if regions:
+        props = max(regions, key=lambda r: r.area)
+        area = props.area
+        minr, minc, maxr, maxc = props.bbox
+        bbox_height, bbox_width = maxr - minr, maxc - minc
+        length = max(bbox_height, bbox_width)
+        width_obj = min(bbox_height, bbox_width)
+        length_width_ratio = length / (width_obj + epsilon)
+        major_axis = getattr(props, 'major_axis_length', 0)
+        minor_axis = getattr(props, 'minor_axis_length', 0)
+        convex_area = getattr(props, 'convex_area', 0)
+        pts = np.array([[c[1], c[0]] for c in props.coords], dtype=np.int32)
+        hull = cv2.convexHull(pts)
+        convex_perimeter = cv2.arcLength(hull, True)
+        perimeter = getattr(props, 'perimeter', 0)
+        eccentricity = getattr(props, 'eccentricity', 0)
+        orientation = getattr(props, 'orientation', 0)
+        solidity = getattr(props, 'solidity', 0)
+        extent = getattr(props, 'extent', 0)
+        roundness = (4.0 * np.pi * area) / ((perimeter**2) + epsilon) if perimeter > 0 else 0
+
+        region_pixels = gray[props.coords[:, 0], props.coords[:, 1]].astype(np.float32)
+        if region_pixels.size > 0:
+            texture_mean = np.mean(region_pixels)
+            texture_std = np.std(region_pixels)
+            hist, _ = np.histogram(region_pixels, bins=256, range=(0, 256), density=True)
+            texture_uniformity = np.sum(hist**2)
+            texture_third_moment = np.mean((region_pixels - texture_mean)**3)
+
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    mean_rgb = np.mean(image_rgb, axis=(0, 1))
+    sqrt_mean_rgb = np.sqrt(mean_rgb)
+    std_rgb = np.std(image_rgb, axis=(0, 1))
+    skew_rgb = [calc_skew(image_rgb[:, :, i]) for i in range(3)]
+
+    enhanced_features = [
+        area, length, width_obj, length_width_ratio,
+        major_axis, minor_axis, convex_area, convex_perimeter,
+        perimeter, eccentricity, orientation, solidity, extent, roundness,
+        mean_rgb[0], mean_rgb[1], mean_rgb[2],
+        sqrt_mean_rgb[0], sqrt_mean_rgb[1], sqrt_mean_rgb[2],
+        std_rgb[0], std_rgb[1], std_rgb[2],
+        skew_rgb[0], skew_rgb[1], skew_rgb[2],
+        texture_mean, texture_std, texture_uniformity, texture_third_moment
+    ]
+    return enhanced_features
+
+def extract_hsv_features(image):
+    """Trích xuất 21 đặc trưng từ không gian HSV."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    channels = cv2.split(hsv)
+    features = []
+    for ch in channels:
+        features.extend(channel_stats(ch))
+    return features
+
+def extract_hls_features(image):
+    """Trích xuất 21 đặc trưng từ không gian HLS."""
+    hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
+    channels = cv2.split(hls)
+    features = []
+    for ch in channels:
+        features.extend(channel_stats(ch))
+    return features
+
+def extract_lab_features(image):
+    """Trích xuất 21 đặc trưng từ không gian LAB."""
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    channels = cv2.split(lab)
+    features = []
+    for ch in channels:
+        features.extend(channel_stats(ch))
+    return features
+
+def extract_ycrcb_features(image):
+    """Trích xuất 21 đặc trưng từ không gian YCrCb."""
+    ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+    channels = cv2.split(ycrcb)
+    features = []
+    for ch in channels:
+        features.extend(channel_stats(ch))
+    return features
+
+def extract_all_features(image):
+    """Trích xuất tất cả 114 đặc trưng: basic (30), HLS (21), HSV (21), YCrCb (21), LAB (21)."""
+    feat_basic = extract_basic_features(image)
+    feat_hls = extract_hls_features(image)
+    feat_hsv = extract_hsv_features(image)
+    feat_ycrcb = extract_ycrcb_features(image)
+    feat_lab = extract_lab_features(image)
+    return feat_basic + feat_hls + feat_hsv + feat_ycrcb + feat_lab
+
+def process_images(folder_path, label):
+    """Duyệt qua các ảnh trong folder và trích xuất vector đặc trưng kèm nhãn."""
+    features_list = []
+    for filename in os.listdir(folder_path):
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            image_path = os.path.join(folder_path, filename)
+            image = cv2.imread(image_path)
+            if image is None:
+                continue
+            feats = extract_all_features(image)
+            features_list.append([label] + feats)
+    return features_list
+
+def get_column_names():
+    """Tạo danh sách tên cột cho DataFrame."""
+    label_column = ['Label']
+    basic_cols = [
+        'Area', 'Length', 'Width', 'LengthWidthRatio',
+        'MajorAxisLength', 'MinorAxisLength', 'ConvexArea', 'ConvexPerimeter',
+        'Perimeter', 'Eccentricity', 'Orientation', 'Solidity', 'Extent', 'Roundness',
+        'Mean_R', 'Mean_G', 'Mean_B',
+        'SqrtMean_R', 'SqrtMean_G', 'SqrtMean_B',
+        'Std_R', 'Std_G', 'Std_B',
+        'Skew_R', 'Skew_G', 'Skew_B',
+        'Texture_Mean', 'Texture_Std', 'Texture_Uniformity', 'Texture_ThirdMoment'
+    ]
+    hls_channels = ['H', 'L', 'S']
+    stats = ['mean', 'std', 'skew', 'kurtosis', 'median', 'min', 'max']
+    hls_cols = [f'HLS_{ch}_{stat}' for ch in hls_channels for stat in stats]
+    hsv_channels = ['H', 'S', 'V']
+    hsv_cols = [f'HSV_{ch}_{stat}' for ch in hsv_channels for stat in stats]
+    ycrcb_channels = ['Y', 'Cr', 'Cb']
+    ycrcb_cols = [f'YCrCb_{ch}_{stat}' for ch in ycrcb_channels for stat in stats]
+    lab_channels = ['L', 'A', 'B']
+    lab_cols = [f'LAB_{ch}_{stat}' for ch in lab_channels for stat in stats]
+    return label_column + basic_cols + hls_cols + hsv_cols + ycrcb_cols + lab_cols
+
+def process_dataset(dataset_name, positive_path, negative_path, output_csv):
+    """Xử lý một tập dữ liệu: trích xuất đặc trưng và lưu CSV."""
+    print(f"Processing dataset: {dataset_name}")
+    features1 = process_images(positive_path, 'positive')
+    features2 = process_images(negative_path, 'negative')
+    all_features = features1 + features2
+    columns = get_column_names()
+    df = pd.DataFrame(all_features, columns=columns)
+    df.to_csv(output_csv, index=False)
+    print(f"Saved features of success! (File: {output_csv})")
+
+datasets = [
+    {
+        'name': 'BC-15',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\BC-15\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\BC-15\negative",
+        'output_csv': 'BC15_features.csv'
+    },
+    {
+        'name': 'Huong_thom-1',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Huong_thom-1\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Huong_thom-1\negative",
+        'output_csv': 'huongthom_features.csv'
+    },
+    {
+        'name': 'Nep-87',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Nep-87\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Nep-87\negative",
+        'output_csv': 'nep_features.csv'
+    },
+    {
+        'name': 'Q-5',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Q-5\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Q-5\negative",
+        'output_csv': 'q5_features.csv'
+    },
+    {
+        'name': 'TBR-36',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TBR-36\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TBR-36\negative",
+        'output_csv': 'tbr36_features.csv'
+    },
+    {
+        'name': 'TBR-45',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TBR-45\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TBR-45\negative",
+        'output_csv': 'tbr45_features.csv'
+    },
+    {
+        'name': 'TH3-5',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TH3-5\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\TH3-5\negative",
+        'output_csv': 'th35_features.csv'
+    },
+    {
+        'name': 'Thien_uu-8',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Thien_uu-8\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Thien_uu-8\negative",
+        'output_csv': 'thienuu_features.csv'
+    },
+    {
+        'name': 'Xi-23',
+        'positive_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Xi-23\positive",
+        'negative_path': r"D:\FPT University\Code_FPT\Season 4\AIL303m\gao\Datasets2\Data\Xi-23\negative",
+        'output_csv': 'xi_features.csv'
+    }
+]
+
+for dataset in datasets:
+    process_dataset(dataset['name'], dataset['positive_path'], dataset['negative_path'], dataset['output_csv'])
